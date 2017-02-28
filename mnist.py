@@ -19,6 +19,10 @@ import gzip
 
 import cPickle as pickle
 
+import os
+
+slurm_name = os.environ["SLURM_JOB_ID"]
+
 #import matplotlib.pyplot as plt
 
 mn = gzip.open("/u/lambalex/data/mnist/mnist.pkl.gz")
@@ -28,6 +32,13 @@ train, valid, test = pickle.load(mn)
 trainx,trainy = train
 validx,validy = valid
 testx, testy = test
+
+discrete = False
+
+print "discrete?", discrete
+
+if discrete:
+    trainx = trainx.round().astype('float32')
 
 srng = theano.tensor.shared_randomstreams.RandomStreams(42)
 
@@ -62,15 +73,15 @@ def init_params_generator():
 def init_params_corruptor():
     p = {}
 
-    p['w1'] = theano.shared(0.01 * rng.normal(size=(784,200)).astype('float32'))
-    p['w2'] = theano.shared(0.01 * rng.normal(size=(200,200)).astype('float32'))
-    p['w3'] = theano.shared(0.01 * rng.normal(size=(200,784)).astype('float32'))
+    p['w1'] = theano.shared(0.01 * rng.normal(size=(784,1024)).astype('float32'))
+    p['w2'] = theano.shared(0.01 * rng.normal(size=(1024,1024)).astype('float32'))
+    p['w3'] = theano.shared(0.01 * rng.normal(size=(1024,784)).astype('float32'))
 
-    p['b1'] = theano.shared(0.0 * rng.normal(size=(200,)).astype('float32'))
-    p['b2'] = theano.shared(0.0 * rng.normal(size=(200,)).astype('float32'))
+    p['b1'] = theano.shared(0.0 * rng.normal(size=(1024,)).astype('float32'))
+    p['b2'] = theano.shared(0.0 * rng.normal(size=(1024,)).astype('float32'))
     p['b3'] = theano.shared(0.0 * rng.normal(size=(784,)).astype('float32'))
 
-    p['log_sigma'] = theano.shared(-1.0 + 0.0*rng.normal(size=(784,)).astype('float32'))
+    p['log_sigma'] = theano.shared(-1.0 + 0.01*rng.normal(size=(784,)).astype('float32'))
 
     return p
 
@@ -99,21 +110,25 @@ def generator(p,z):
     h1 = T.nnet.relu(bn(T.dot(z, p['w1']) + p['b1']), alpha=0.02)
     h2 = T.nnet.relu(bn(T.dot(h1,p['w2']) + p['b2']), alpha=0.02)
 
-    xg = T.dot(h2, p['w3']) + p['b3']
+    xg = T.nnet.sigmoid(T.dot(h2, p['w3']) + p['b3'])
 
     return xg    
+
+def logit(p):
+    #return T.log(p/(1-p) + 0.01)
+    return T.log(p + 0.01) - T.log(1 - p + 0.01)
 
 def corruptor(p,x):
 
     h1 = T.nnet.relu(bn(T.dot(x, p['w1']) + p['b1']), alpha=0.02)
     h2 = T.nnet.relu(bn(T.dot(h1,p['w2']) + p['b2']), alpha=0.02)
-    xc = T.dot(h2, p['w3'])*0.0 + p['b3']*0.0 + srng.normal(size=x.shape) * T.exp(p['log_sigma'])
+    xc = T.dot(h2, p['w3']) + p['b3'] + 0.0 * srng.normal(size=x.shape) * T.exp(p['log_sigma'])
 
-    return xc + x
+    return T.nnet.sigmoid(xc)
 
 def discriminator(p,x):
-    h1 = T.nnet.relu(bn(T.dot(x, p['w1']) + p['b1']), alpha=0.02)
-    h2 = T.nnet.relu(bn(T.dot(h1,p['w2']) + p['b2']), alpha=0.02)
+    h1 = T.nnet.relu(T.dot(x, p['w1']) + p['b1'], alpha=0.02)
+    h2 = T.nnet.relu(T.dot(h1,p['w2']) + p['b2'], alpha=0.02)
     s = T.dot(h2, p['w3']) + p['b3']
 
     return s
@@ -140,16 +155,21 @@ noise_z = srng.normal(size=(128,128))
 x_gen = generator(g_params, noise_z)
 
 x_corr = corruptor(c_params,x)
-x_gen_corr = corruptor(c_params,x_gen)
+x_gen_corr = x_gen
 
-d_real = discriminator(d_params, x_corr)
 
 d_fake = discriminator(d_params, x_gen_corr)
 
-d_loss = d_fake.mean() - d_real.mean()
+d_corrupt_real = discriminator(d_params, x_corr)
+
+d_loss = d_fake.mean() - d_corrupt_real.mean()
 g_loss = -d_fake.mean()
 
-c_cost = 0.01 * (T.sqr(x_corr - x).mean() + T.sqr(x_gen_corr - x_gen).mean())
+c_weight = 1000.0
+
+print "cweight", c_weight
+
+c_cost = c_weight * (T.sqr(logit(x_corr) - logit(x)).mean() + T.sqr(x_gen_corr - x_gen).mean())
 
 lr = 0.001
 
@@ -168,7 +188,7 @@ do_plot = False
 
 if __name__ == "__main__":
 
-    for iteration in range(0,100000):
+    for iteration in range(0,500000):
 
         r = randint(0,40000)
 
@@ -192,10 +212,10 @@ if __name__ == "__main__":
             print "mean match corr", x_corr.mean(), x_gen_corr.mean()
             print "std match corr", x_corr.std(), x_gen_corr.std()
 
-            plot_images(xs.reshape((128,1,28,28)), "plots/real.png")
-            plot_images(x_gen.reshape((128,1,28,28)), "plots/gen.png")
-            plot_images(x_corr.reshape((128,1,28,28)).clip(0.0,1.0), "plots/corrupt_real")
-            plot_images(x_gen_corr.reshape((128,1,28,28)).clip(0.0,1.0), "plots/corrupt_gen")
+            plot_images(xs.reshape((128,1,28,28)), "plots/" + slurm_name + "_real.png")
+            plot_images(x_gen.reshape((128,1,28,28)), "plots/" + slurm_name + "_gen.png")
+            plot_images(x_corr.reshape((128,1,28,28)).clip(0.0,1.0), "plots/" + slurm_name + "_corrupt_real")
+            plot_images(x_gen_corr.reshape((128,1,28,28)).clip(0.0,1.0), "plots/" + slurm_name + "_corrupt_gen")
 
             if do_plot:
                 plt.hist(xs,alpha=0.5)
